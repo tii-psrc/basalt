@@ -50,7 +50,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <geometry_msgs/PoseStamped.h>
 #include <geometry_msgs/TransformStamped.h>
 #include <sensor_msgs/Image.h>
+#include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/Imu.h>
+
+#include <boost/endian/conversion.hpp>
+#include <opencv2/highgui/highgui.hpp>
+//#include <opencv2/opencv.hpp>
 
 #include <basalt/utils/filesystem.h>
 
@@ -113,9 +118,41 @@ class RosbagVioDataset : public VioDataset {
         if (!it->second[i].has_value()) continue;
 
         m.lock();
-        sensor_msgs::ImageConstPtr img_msg =
-            bag->instantiateBuffer<sensor_msgs::Image>(*it->second[i]);
+        sensor_msgs::CompressedImageConstPtr compr_img_msg =
+            bag->instantiateBuffer<sensor_msgs::CompressedImage>(*it->second[i]);
         m.unlock();
+
+        cv::Mat cvImg = cv::imdecode(compr_img_msg->data, 0);
+        sensor_msgs::ImagePtr img_msg = boost::make_shared<sensor_msgs::Image>();
+        img_msg->header = compr_img_msg->header;
+        img_msg->height = cvImg.rows;
+        img_msg->width = cvImg.cols;
+        if(cvImg.channels() > 1)
+            img_msg->encoding = "bgr8";
+        else
+            img_msg->encoding = "mono8";
+        img_msg->is_bigendian = (boost::endian::order::native == boost::endian::order::big);
+        img_msg->step = cvImg.cols * cvImg.elemSize();
+        size_t size = img_msg->step * cvImg.rows;
+        img_msg->data.resize(size);
+
+        if (cvImg.isContinuous())
+        {
+            memcpy((char*)(&img_msg->data[0]), cvImg.data, size);
+        }
+        else
+        {
+            // Copy row by row
+            uchar* ros_data_ptr = (uchar*)(&img_msg->data[0]);
+            uchar* cv_data_ptr = cvImg.data;
+            for (int i = 0; i < cvImg.rows; ++i)
+            {
+                memcpy(ros_data_ptr, cv_data_ptr, img_msg->step);
+                ros_data_ptr += img_msg->step;
+                cv_data_ptr += cvImg.step;
+            }
+        }
+
 
         //        std::cerr << "img_msg->width " << img_msg->width << "
         //        img_msg->height "
@@ -192,7 +229,7 @@ class RosbagIO : public DatasetIoInterface {
       //        mocap_topic = info->topic;
       //      }
 
-      if (info->datatype == std::string("sensor_msgs/Image")) {
+      if (info->datatype == std::string("sensor_msgs/CompressedImage")) {
         cam_topics.insert(info->topic);
       } else if (info->datatype == std::string("sensor_msgs/Imu") &&
                  info->topic.rfind("/fcu", 0) != 0) {
@@ -240,8 +277,8 @@ class RosbagIO : public DatasetIoInterface {
       const std::string &topic = m.getTopic();
 
       if (cam_topics.find(topic) != cam_topics.end()) {
-        sensor_msgs::ImageConstPtr img_msg =
-            m.instantiate<sensor_msgs::Image>();
+        sensor_msgs::CompressedImageConstPtr img_msg =
+            m.instantiate<sensor_msgs::CompressedImage>();
         int64_t timestamp_ns = img_msg->header.stamp.toNSec();
 
         auto &img_vec = data->image_data_idx[timestamp_ns];
